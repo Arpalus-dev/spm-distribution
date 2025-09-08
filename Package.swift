@@ -2,7 +2,7 @@
 import PackageDescription
 
 let version = "0.2.0"
-let checksum = "cb2553aa5c55fa2d1624555e5a9846ffa55ae8df8f2c656c18aed2e4589d4c6b"
+let checksum = "3a209c9693b72a006727c1056a44b8be2a5680dd77edc9cd2c0c45e42695462a"
 
 let package = Package(
     name: "ArpalusSDK",
@@ -18,7 +18,7 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "ArpalusSDK",
-            url: "https://backend-api-105992620489.europe-west1.run.app/firebase/sdks/sdk.zip?platform=ios&version=\(version)",
+            url: "https://sdk.arpalus.com/firebase/sdks/sdk.zip?platform=ios&version=\(version)",
             checksum: checksum
         )
     ]
