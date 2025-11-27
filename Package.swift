@@ -2,7 +2,7 @@
 import PackageDescription
 
 let version = "0.3.0"
-let checksum = "ab9fb25a788bebaa621dcfe01987d3499639c14c68c259a5432105b964861872"
+let checksum = "80a6f10a28b9a6b483f0f8982797638caf328e2bdd04ccb40899705679f8dbc5"
 
 let package = Package(
     name: "ArpalusSDK",
