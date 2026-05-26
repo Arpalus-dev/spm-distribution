@@ -819,9 +819,11 @@ Arpalus.startSession(
 | :--- | :--- |
 | `authenticate` / `login` | Unauthorized, Network error, HTTP error, Server error, Configuration error |
 | `initialize` | Configuration error, Network/HTTP/Server error, Missing permissions, Missing resources |
-| `startSession` | Configuration error, Missing permissions, Missing resources |
+| `startSession` | Configuration error (`Missing client ID` / `Missing user ID`); Wrapped / underlying error if the session directory cannot be created on disk |
 | `getScanViewController` | Configuration error, Missing permissions, Missing resources, Scan view creation failed |
-| `endAndUploadSession` | Configuration error, Network error |
+| `endAndUploadSession` | Configuration error (`Session not found or not active: <id>`) — upload failures are **not** delivered here; see note below |
+
+> **Upload outcomes are not reported through `endAndUploadSession`.** Its completion fires with `.success` as soon as the upload is dispatched; it only fails with a Configuration error when the session is missing or not active. To observe whether the upload actually succeeds, retries, or fails, subscribe to `getUploadInfo()` (see [§10. Monitoring Upload Progress](#10-monitoring-upload-progress)) and track the per-session `UploadState`.
 
 ## 19. Best Practices
 
