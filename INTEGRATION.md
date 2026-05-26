@@ -761,7 +761,69 @@ The SDK supports offline operation after at least one successful online session:
 
 No additional code is required to enable offline support — it works transparently.
 
-## 18. Best Practices
+## 18. Error Handling
+
+Every asynchronous SDK action reports failure through its completion handler as a `Result<T, Error>`:
+
+- `authenticate(token:completion:)`
+- `login(email:password:completion:)`
+- `initialize(clientId:projectId:completion:)`
+- `startSession(…:completion:)`
+- `endAndUploadSession(sessionId:completion:)`
+- `getScanViewController(…:completion:)`
+
+`cancelSession(sessionId:)` does not report errors.
+
+Errors are surfaced as the standard Swift `Error`. Handle the `.failure` case and read `error.localizedDescription` for a human-readable message:
+
+```swift
+Arpalus.startSession(
+    projectName: hierarchy.projectName,
+    storeId: store.storeId,
+    aisleId: aisle.id,
+    displayId: aisle.displayId,
+    userData: [:]
+) { result in
+    switch result {
+    case .success(let sessionId):
+        // proceed
+        break
+    case .failure(let error):
+        print("Arpalus error: \(error.localizedDescription)")
+        // Identify the condition from the message text (see table below).
+    }
+}
+```
+
+> **Note:** SDK 2.1.5 does not expose stable, machine-readable error codes. Identify a failure by the condition / message described below, and use `localizedDescription` for logs and user-facing fallback text.
+
+### Error Reference
+
+| Condition | `localizedDescription` | When it occurs | Recommended action |
+| :--- | :--- | :--- | :--- |
+| Configuration error | `Configuration error occurred`, or a specific detail such as `Missing client ID`, `Missing user ID`, `Session not found or not active: <id>`, `Invalid base URL`, or `Failed to save configuration` | Calling actions out of order or with invalid identifiers, referencing an unknown/inactive session, configuration fetch/save failures, or recognition-model download/compile failures | Authenticate and `initialize` before scanning; verify client/project/store/aisle and session identifiers; retry on a stable connection |
+| Unauthorized | `Unauthorized Access` | Access token, refresh token, or credentials were missing or rejected | Authenticate again before retrying |
+| Resource not found | `Resource Not Found` | A requested server resource was not found | Verify the identifiers used for the request |
+| Server error | `Server Error (<code>)` | Backend returned a server-side (5xx) error | Retry later; contact Arpalus support if it persists |
+| Network error | `Network Error: <detail>` — e.g. `Network Error: Cannot connect to host`, `Network Error: Invalid or unexpected response type`, `Network Error: Upload failed with status code: <n>` | Device is offline, transport failed, an unexpected response was received, or a background upload failed | Retry when connectivity returns |
+| HTTP error | `HTTP Error (<statusCode>)` | Server returned a non-success HTTP status | Inspect the status code; retry if appropriate |
+| Missing permissions | `Missing Permissions: <list>` — e.g. `CheckPermissions: Camera access denied`, `CheckPermissions: Location access restricted or denied` | Required camera or location permission is denied or restricted (checked before scanning) | Grant the required permissions in iOS Settings and retry |
+| Missing resources | `Missing Resources: <list>` — e.g. `CheckResources: ARKit capability is not supported`, `CheckResources: Not enough ram`, `CheckResources: not enough disk space`, `CheckResources: Disk capacity is unavailable` | A required device capability or resource is unavailable (checked before scanning) | Use a supported physical device; close other apps to free memory; free device storage |
+| Location error | `Location Error` | A location-related failure occurred | Check location permission/services and retry |
+| Wrapped / underlying error | `Error: <underlying message>` | A lower-level system or Vision/CoreML error was wrapped by the SDK; raw `URLError` or decoding errors may also surface directly | Inspect the underlying message; retry and share it with support if it persists |
+| Scan view creation failed | `Failed to create ScanViewController: <detail>` | The scan UI could not be created | Verify session state, permissions, device resources, and that initialization succeeded |
+
+### Errors by API
+
+| API | Conditions it can surface |
+| :--- | :--- |
+| `authenticate` / `login` | Unauthorized, Network error, HTTP error, Server error, Configuration error |
+| `initialize` | Configuration error, Network/HTTP/Server error, Missing permissions, Missing resources |
+| `startSession` | Configuration error, Missing permissions, Missing resources |
+| `getScanViewController` | Configuration error, Missing permissions, Missing resources, Scan view creation failed |
+| `endAndUploadSession` | Configuration error, Network error |
+
+## 19. Best Practices
 
 1. **Authenticate once at app launch.** Store the access key securely (e.g., in the Keychain or a secure configuration file).
 2. **Initialize after authentication.** Call `initialize` once per app session. The `Hierarchy` can be cached in memory.
@@ -772,7 +834,7 @@ No additional code is required to enable offline support — it works transparen
 7. **Use `getSessionsFolderSize()` to monitor storage.** Scan data can accumulate. Consider prompting the user when storage grows large.
 8. **Physical device only.** AR features require a physical device. Include appropriate checks for Simulator builds.
 
-## 19. Complete Integration Example
+## 20. Complete Integration Example
 
 The following example demonstrates the full SDK integration flow in a single controller class:
 
