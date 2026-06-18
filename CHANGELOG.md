@@ -8,6 +8,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 _Changes that have not yet been released will be listed here._
 
+## [2.1.6] — 2026-06-18
+
+### Added
+- **Session restore & logout** — `Arpalus.restoreSession(completion:)` restores a previously authenticated session on launch (refreshing tokens when online), and `Arpalus.logout(completion:)` clears cached auth state. Cached active sessions survive a logout for later upload.
+- **`Arpalus.onSessionExpired`** — an `AnyPublisher<Void, Never>` that fires when the silent token refresh fails because the refresh token is no longer valid. Observe it to route the user to sign-in; the SDK stays logged in so unfinished sessions can still upload.
+- **Manual upload retry** — `Arpalus.retryUpload(sessionId:completion:)`. Failed uploads are no longer retried automatically; call this to give the user an explicit "retry" action (clears the recorded failure, resets the attempt counter, and restarts the upload if the network is available).
+- **Scan event stream** — `ScanViewController.scanEvents` (an `AsyncStream<ScanEvent>`) and `ScanViewController.scanEventsPublisher` (a Combine publisher) surface the scanner lifecycle: state changes, calibration progress/failure/completion, warnings, modals, image/scan counts, AR-tracking loss & restore, `scanError(ScanError)`, and `productsDetected` (detections written to the scan's `ScanInfo.json`). New public types: `ScanEvent`, `ScanError`, `CalibrationFailureReason`, `CameraUnavailableReason`, `ARTrackingLossReason`, `WarningClearScope`.
+- **Per-category detector flow (models_v2)** — for projects shipping non-generic per-category detectors:
+  - `Arpalus.hasDownloadableModels` / `Arpalus.requiredModels()` (returns a `RequiredModelsManifest`) to inspect the required model set and cache state after `initialize`.
+  - `Arpalus.downloadRequiredModels(…)` and `Arpalus.getModelDownloadViewController(…)` for a manual model-download flow.
+  - `Arpalus.availableDetectors(forAisleCvCategory:)` (returns `[DetectorOption]`), `Arpalus.prepareDetectors(…)`, and `Arpalus.getScanViewController(sessionId:detectorId:customOverlay:completion:)` to present a detector picker and pin the chosen detector for a scan.
+- **`Arpalus.handleBackgroundURLSessionEvents(identifier:completion:) -> Bool`** — forward background `URLSession` relaunch events from your `AppDelegate` so resumable uploads can finish while the app is suspended. Returns `true` only for the SDK's own background session, so apps with their own background sessions can still handle theirs.
+- **`Arpalus.cancelSession(sessionId:completion:)`** — a completion-based variant that reports a `session.notFound` failure.
+
+### Changed
+- **Completion handlers now deliver a structured `ArpalusError` instead of a bare `Error`** (source-breaking). `ArpalusError` exposes a stable `code` and a human-readable `message`, with nested failure categories (`auth`, `configuration`, `network`, `session`, `device`). Affects `authenticate`, `login`, `initialize`, `startSession`, `endAndUploadSession`, `getScanViewController`, and the new APIs above.
+- **`startSession` now surfaces auth-expiry on an expired/cleared session** (so the host's re-login recovery fires) instead of a generic, unrecoverable configuration error.
+- **Upload failures are now terminal** and not retried automatically — use `retryUpload(sessionId:)`. `UploadState` gains a `.failed` case, and `ActiveSession` gains `scanIds` and an optional `uploadFailure`.
+
+### Deprecated
+- `Arpalus.cancelSession(sessionId:)` — use `cancelSession(sessionId:completion:)` to observe `session.notFound`.
+
+### Fixed
+- Handle `409 Conflict` from the resumable upload endpoint.
+- Rebuild stale session zips and detect zip write failures instead of reusing or shipping a truncated archive (silent data loss).
+- Sessions with zero scans are dropped instead of uploaded.
+- Low storage: warn the user and surface a zip out-of-space condition as a terminal storage failure.
+- Crash fixes around the active-sessions list and `getUploadInfo()`.
+- Auth hardening: only treat `401` on token refresh as expiry, keep offline state when clearing, and apply the latest configuration on offline load.
+
 ## [2.1.5] — 2026-05-12
 
 ### Changed
@@ -37,7 +67,8 @@ Initial 2.x release. Major rewrite covering:
 - New session management API: `startSession` / `getScanViewController(sessionId:)` / `endAndUploadSession` / `cancelSession` / `listActiveSessions`.
 - Resumable background uploads with `getUploadInfo()` Combine publisher.
 
-[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.5...HEAD
+[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.6...HEAD
+[2.1.6]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.5...v2.1.6
 [2.1.5]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.3...v2.1.5
 [2.1.3]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.2...v2.1.3
 [2.0.0]: https://github.com/Arpalus-dev/spm-distribution/releases/tag/v2.0.0

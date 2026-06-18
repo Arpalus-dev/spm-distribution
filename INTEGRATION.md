@@ -91,14 +91,66 @@ Arpalus.authenticate(token: "your-access-key") { result in
 ```swift
 public static func authenticate(
     token: String,
-    completion: @escaping (Result<AuthResponse, Error>) -> Void
+    completion: @escaping (Result<AuthResponse, ArpalusError>) -> Void
 )
 ```
 
 | Parameter | Type | Description |
 | :--- | :--- | :--- |
 | `token` | `String` | The SDK access key provided by the Arpalus DevOps team. |
-| `completion` | `Result<AuthResponse, Error>` | Called on completion with the authentication response or an error. |
+| `completion` | `Result<AuthResponse, ArpalusError>` | Called on completion with the authentication response or a structured `ArpalusError` (see [§18. Error Handling](#18-error-handling)). |
+
+> **Failure (`ArpalusError`) codes:** `auth.unauthorized`, `auth.offlineCredentialsUnavailable`, `network.*`, `http.*`, `unknown`.
+
+### Restoring a Session & Logging Out
+
+Once a user has authenticated, you don't need to prompt them for the access key on every launch. Call `restoreSession` on startup to re-establish the cached session (refreshing tokens when online, falling back to cached credentials when offline):
+
+```swift
+Arpalus.restoreSession { result in
+    switch result {
+    case .success(let auth):
+        // Session restored — SDK is authenticated again.
+        break
+    case .failure(let error):
+        // No valid cached session — route the user to your sign-in screen.
+        print("Restore failed: \(error.code)")
+    }
+}
+```
+
+```swift
+public static func restoreSession(
+    completion: @escaping (Result<AuthResponse, ArpalusError>) -> Void
+)
+```
+
+> **Failure codes:** `auth.unauthorized`, `auth.offlineCredentialsUnavailable`, `network.*`, `http.*`, `unknown`.
+
+To clear cached authentication state (sign out), call `logout`. Any cached active sessions are **retained** so their data can still upload later:
+
+```swift
+public static func logout(completion: (() -> Void)? = nil)
+```
+
+### Detecting Session Expiry
+
+If the SDK's silent token refresh fails because the refresh token is no longer valid, the user's session has truly expired. Observe the `onSessionExpired` publisher and route the user back to sign-in. The SDK is **not** logged out automatically, so any unfinished sessions survive for later upload:
+
+```swift
+import Combine
+
+Arpalus.onSessionExpired
+    .receive(on: DispatchQueue.main)
+    .sink { presentSignIn() }
+    .store(in: &cancellables)
+```
+
+```swift
+public static var onSessionExpired: AnyPublisher<Void, Never> { get }
+```
+
+> `login(email:password:completion:)` shares the same shape as `authenticate`, returning `Result<AuthResponse, ArpalusError>`. Its failure codes also include `configuration.invalid`.
 
 ### AuthResponse
 
@@ -165,7 +217,7 @@ Arpalus.initialize(clientId: clientId, projectId: projectId) { result in
 public static func initialize(
     clientId: String,
     projectId: String,
-    completion: @escaping (Result<Hierarchy, Error>) -> Void
+    completion: @escaping (Result<Hierarchy, ArpalusError>) -> Void
 )
 ```
 
@@ -173,7 +225,7 @@ public static func initialize(
 | :--- | :--- | :--- |
 | `clientId` | `String` | The client identifier from the `AuthResponse`. |
 | `projectId` | `String` | The project identifier selected from the client's projects. |
-| `completion` | `Result<Hierarchy, Error>` | Called with the store/aisle hierarchy or an error. |
+| `completion` | `Result<Hierarchy, ArpalusError>` | Called with the store/aisle hierarchy or a structured `ArpalusError`. |
 
 ### What Happens During Initialization
 
@@ -220,6 +272,77 @@ public struct PlanInfo: Codable, Equatable {
 }
 ```
 
+### Downloading Models for Per-Category Detectors (Optional)
+
+Some projects ship **per-category detectors** (the "models_v2" flow) — a dedicated detector per CV category instead of a single generic model. For these projects you can drive an explicit, user-visible model-download step before scanning. Projects that use only the classic/generic detector don't need any of this; models download silently.
+
+Use `hasDownloadableModels` after `initialize` to branch your UX:
+
+```swift
+public static var hasDownloadableModels: Bool { get }
+```
+
+When `true`, present the manual download flow and observe `ScanViewController.scanEvents` for `.productsDetected` during scanning (see [§8](#8-step-4--present-the-scan-view-controller)). When `false`, skip the download screen entirely.
+
+Inspect what the active project requires (and what's already cached) via `requiredModels()`:
+
+```swift
+public static func requiredModels() -> RequiredModelsManifest?   // nil before initialize succeeds
+
+public struct RequiredModelsManifest: Equatable {
+    public struct CategoryGroup: Equatable {
+        public let cvCategory: String
+        public let detector: ModelDescriptor?
+        public let classifiers: [ModelDescriptor]
+    }
+    public let groups: [CategoryGroup]
+    public let modelsNeedingDownload: [ModelDescriptor]   // not yet on disk, deduplicated
+    public var totalEstimatedBytes: Int64? { get }        // nil if no model reported a size
+    public var isEmpty: Bool { get }
+}
+
+public struct ModelDescriptor: Equatable, Hashable {
+    public enum Role: String { case detector, classifier }
+    public let name: String
+    public let url: URL
+    public let role: Role
+    public let cvCategory: String?
+    public let isCached: Bool
+    public let estimatedBytes: Int64?
+}
+```
+
+Trigger the download yourself with `downloadRequiredModels` (safe to call repeatedly — cached models are skipped):
+
+```swift
+public static func downloadRequiredModels(
+    selectedCvCategories: Set<String>? = nil,   // nil = download everything
+    progress: @escaping (ModelDownloadProgress) -> Void,
+    completion: @escaping (Result<Void, Error>) -> Void
+)
+
+public enum ModelDownloadProgress: Equatable {
+    case downloading(currentModel: String, bytesDownloaded: Int64, totalBytes: Int64?, modelIndex: Int, modelCount: Int)
+    case unzipping(currentModel: String, modelIndex: Int, modelCount: Int)
+    case compiling(currentModel: String, modelIndex: Int, modelCount: Int)
+}
+```
+
+Or let the SDK present a ready-made progress UI. `getModelDownloadViewController` returns `nil` when there's nothing to download, so you can skip presentation:
+
+```swift
+// Must be called on the main thread.
+if let downloadVC = Arpalus.getModelDownloadViewController(completion: { /* user tapped Continue */ }) {
+    navigationController?.pushViewController(downloadVC, animated: true)
+} else {
+    // Nothing to download — proceed straight to scanning.
+}
+
+public static func getModelDownloadViewController(
+    completion: @escaping () -> Void
+) -> ModelDownloadViewController?
+```
+
 ## 7. Step 3 — Start a Scan Session
 
 Before presenting the scan camera, create a session. A session groups one or more individual scans together (e.g., scanning multiple shelf sections in the same aisle).
@@ -250,7 +373,7 @@ public static func startSession(
     aisleId: String,
     displayId: String,
     userData: [String: Any],
-    completion: @escaping (Result<String, Error>) -> Void
+    completion: @escaping (Result<String, ArpalusError>) -> Void
 )
 ```
 
@@ -261,7 +384,9 @@ public static func startSession(
 | `aisleId` | `String` | The **server-unique** `Aisle.id` from the selected aisle. Used internally to resolve the aisle's `cv_category` from the hierarchy. |
 | `displayId` | `String` | The **human-facing** `Aisle.displayId` (e.g. `"Aisle-4"`). Recorded as `display_id` in the scan metadata that flows downstream. |
 | `userData` | `[String: Any]` | Optional free-form metadata attached to session logs. |
-| `completion` | `Result<String, Error>` | Called with the `sessionId` string on success. |
+| `completion` | `Result<String, ArpalusError>` | Called with the `sessionId` string on success. |
+
+> **Failure codes:** `session.createFailed` (with an underlying cause such as `auth.unauthorized`, `configuration.*`, `storage.writeFailed`, or `resources.insufficientStorage`). If the auth session expired or was cleared, the cause is `auth.unauthorized` — route the user to re-login. Observe [`onSessionExpired`](#restoring-a-session--logging-out) to catch this globally.
 
 > **Why both `aisleId` and `displayId`?** `Aisle.id` is guaranteed unique per project, so the SDK uses it as the cache key when looking up the aisle's CV category. `Aisle.displayId` is the human-readable label that ends up in downstream reports. Passing both removes the ambiguity that occurred when multiple stores happened to share the same `displayId`.
 
@@ -296,7 +421,7 @@ Arpalus.getScanViewController(sessionId: sessionId) { result in
 public static func getScanViewController(
     sessionId: String,
     customOverlay: (() -> ScanOverlay)? = nil,
-    completion: @escaping (Result<ScanViewController, Error>) -> Void
+    completion: @escaping (Result<ScanViewController, ArpalusError>) -> Void
 )
 ```
 
@@ -304,7 +429,9 @@ public static func getScanViewController(
 | :--- | :--- | :--- |
 | `sessionId` | `String` | The session ID returned by `startSession()`. |
 | `customOverlay` | `(() -> ScanOverlay)?` | Optional closure providing a custom UI overlay. Pass `nil` for built-in UI. |
-| `completion` | `Result<ScanViewController, Error>` | Called with the configured scan view controller. |
+| `completion` | `Result<ScanViewController, ArpalusError>` | Called with the configured scan view controller. |
+
+> **Failure codes:** `session.notFound`, `session.notActive`, `scan.viewCreationFailed`, plus the pre-scan `permissions.denied` / `resources.*` checks.
 
 ### ScanViewController
 
@@ -315,10 +442,120 @@ public final class ScanViewController: UIViewController {
 
     /// Called when the user cancels the scan session.
     public func setOnScanCancelled(_ handler: ((String) -> Void)?)
+
+    /// Async stream of user-visible scanner events (see "Observing Scan Events").
+    public var scanEvents: AsyncStream<ScanEvent> { get }
+
+    /// Combine equivalent of `scanEvents`.
+    public var scanEventsPublisher: AnyPublisher<ScanEvent, Never> { get }
 }
 ```
 
 > **Important:** The `ScanViewController` manages its own AR session, camera feed, and UI. Present it full-screen and dismiss it in response to the `onScanFinished` or `onScanCancelled` callbacks.
+
+### Choosing a Detector (Per-Category Projects)
+
+For projects with per-category detectors, you can let the user pick which detector runs for a scan. List the detectors available for an aisle's CV category (the "General Product" fallback is always appended):
+
+```swift
+public static func availableDetectors(forAisleCvCategory cvCategory: String?) -> [DetectorOption]
+
+public struct DetectorOption: Equatable {
+    public let id: String           // SDK-internal model name — pass to getScanViewController(detectorId:)
+    public let displayName: String  // human label for the picker
+    public let cvCategory: String
+    public let isGeneric: Bool       // true for the "General Product" fallback
+}
+```
+
+Optionally pre-download every detector available to the aisle when the user enters a session, so the picker can offer a fast selection:
+
+```swift
+public static func prepareDetectors(
+    forAisleCvCategory cvCategory: String?,
+    progress: ((String) -> Void)? = nil,
+    completion: @escaping (Result<Void, Error>) -> Void
+)
+```
+
+Then present the scan view controller pinned to the chosen detector:
+
+```swift
+public static func getScanViewController(
+    sessionId: String,
+    detectorId: String,                              // DetectorOption.id
+    customOverlay: (() -> ScanOverlay)? = nil,
+    completion: @escaping (Result<ScanViewController, ArpalusError>) -> Void
+)
+```
+
+### Observing Scan Events
+
+`ScanViewController` exposes a stream of user-visible events emitted while an individual scan is running — useful for driving a custom overlay or analytics. Consume it as an `AsyncStream` or a Combine publisher:
+
+```swift
+Task {
+    for await event in scanViewController.scanEvents {
+        switch event {
+        case .scanStateChanged(let state): updateUI(state)
+        case .calibrationProgressChanged(let progress): show(progress)
+        case .scanSaved(let scanId, let scanNumber): print("Saved \(scanId) (#\(scanNumber))")
+        case .productsDetected(let image, let detections): overlay(detections, on: image)
+        case .scanError(let error): handle(error)
+        default: break
+        }
+    }
+}
+```
+
+```swift
+public enum ScanEvent: Equatable {
+    case scanStateChanged(ScanState)
+    case calibrationProgressChanged(CalibrationProgress)
+    case calibrationFailed(reason: CalibrationFailureReason)
+    case calibrationCompleted(duration: TimeInterval)
+    case warningShown(WarningType)
+    case warningsCleared(scope: WarningClearScope)
+    case modalShown(ScanModal)
+    case imageCountChanged(Int)
+    case scanStarted(scanId: String)
+    case scanSaved(scanId: String, scanNumber: Int)
+    case scanCancelled
+    case scanReset
+    case scanInterrupted
+    case arTrackingRestored
+    case scanError(ScanError)
+    /// Emitted by the per-category detector flow for each saved image.
+    case productsDetected(image: ScanDetectionImage, detections: [ScanDetection])
+}
+```
+
+The detection payloads mirror what is written to the scan's `ScanInfo.json`. Detection `x`/`y` are the **normalized center** of the bounding box; `width`/`height` are normalized dimensions:
+
+```swift
+public struct ScanDetection: Equatable {
+    public let id: Int
+    public let name: String
+    public let categoryName: String
+    public let modelName: String
+    public let confidence: Double
+    public let x: Double          // normalized bounding-box center X
+    public let y: Double          // normalized bounding-box center Y
+    public let width: Double
+    public let height: Double
+    public let frameNumber: Int
+}
+
+public struct ScanDetectionImage: Equatable {
+    public let scanId: String
+    public let imageIndex: Int
+    public let timestamp: String
+    public let width: Int
+    public let height: Int
+}
+```
+
+> `scanEvents` / `scanEventsPublisher` emit on the scanner's internal queue. Use `receive(on:)` (Combine) or hop to the main actor before touching UIKit.
 
 ### ScanResult
 
@@ -351,9 +588,11 @@ Arpalus.endAndUploadSession(sessionId: sessionId) { result in
 ```swift
 public static func endAndUploadSession(
     sessionId: String,
-    completion: @escaping (Result<ScanResult, Error>) -> Void
+    completion: @escaping (Result<ScanResult, ArpalusError>) -> Void
 )
 ```
+
+> **Failure codes:** `session.notFound`, `session.notActive`, `storage.writeFailed`, `resources.insufficientStorage`, `unknown`. Upload *delivery* failures are **not** reported here — observe them via `getUploadInfo()` (see [§10](#10-monitoring-upload-progress)).
 
 This method performs the following:
 
@@ -382,11 +621,20 @@ Arpalus.getUploadInfo()
             progressBar.progress = Float(progress) / 100.0
         case .paused(let progress):
             print("Upload paused at \(progress)%")
+        case .failed(let failure):
+            // A terminal failure that won't retry on its own — offer a manual retry.
+            print("Upload failed: \(failure.message) [\(failure.code)]")
+            showRetryButton(for: failure.sessionId)
         }
 
         // Per-session progress
         for (sessionId, progress) in info.sessions {
             print("Session \(sessionId): \(progress)%")
+        }
+
+        // Per-session failure details (including ones still being auto-retried)
+        for (sessionId, failure) in info.failures {
+            print("Session \(sessionId) error: \(failure.message)")
         }
     }
     .store(in: &cancellables)
@@ -403,17 +651,33 @@ Arpalus.getUploadInfo()
 ```swift
 public enum UploadState: Equatable {
     case idle
-    case uploading(progress: Int)  // 0 — 100
-    case paused(progress: Int)     // 0 — 100
+    case uploading(progress: Int)      // 0 — 100
+    case paused(progress: Int)         // 0 — 100
+    case failed(UploadFailureInfo)     // a terminal failure pins this state
 }
 
 public struct UploadInfo: Equatable {
     public let state: UploadState
-    public let sessions: [String: Int]  // Per-session progress (0 — 100), keyed by sessionId
+    public let sessions: [String: Int]                 // Per-session progress (0 — 100), keyed by sessionId
+    public let failures: [String: UploadFailureInfo]   // Per-session failure details, keyed by sessionId
 
-    public static let idle = UploadInfo(state: .idle, sessions: [:])
+    public static let idle = UploadInfo(state: .idle, sessions: [:], failures: [:])
+}
+
+public struct UploadFailureInfo: Codable, Equatable {
+    public let sessionId: String
+    public let code: String                  // e.g. "network.error", "http.error"
+    public let message: String
+    public let recoverySuggestion: String?
+    public let underlyingDescription: String?
+    public let isRetryable: Bool
+    /// `true` when the error was retryable but the SDK stopped after exhausting its retry cap.
+    public let attemptsExhausted: Bool
+    // Plus the originating cause: causeCode / causeMessage / causeRecoverySuggestion / causeUnderlyingDescription.
 }
 ```
+
+> **Only *terminal* failures pin the `.failed` state.** A session marked `.failed` (a non-retryable error, or one that exhausted the retry cap) won't upload again without user action — call [`retryUpload(sessionId:)`](#11-session-management). Transient failures that the SDK is still auto-retrying don't change `state`; their details still appear in `info.failures`.
 
 ## 11. Session Management
 
@@ -430,10 +694,34 @@ for session in sessions {
 
 ### Cancel a Session
 
-Abandons a session and **permanently deletes** all its data from disk.
+Abandons a session and **permanently deletes** all its data from disk. Prefer the completion-based variant so you can observe a `session.notFound` failure:
 
 ```swift
-Arpalus.cancelSession(sessionId: sessionId)
+Arpalus.cancelSession(sessionId: sessionId) { result in
+    // .failure(.session(.notFound)) if the id is unknown
+}
+
+public static func cancelSession(
+    sessionId: String,
+    completion: @escaping (Result<Void, ArpalusError>) -> Void
+)
+```
+
+> The fire-and-forget `cancelSession(sessionId:)` (no completion) is **deprecated** in 2.1.6 — use the variant above.
+
+### Retry a Failed Upload
+
+A failed upload (surfaced as `UploadState.failed` via `getUploadInfo()`) is **not** retried automatically — neither a non-retryable error nor an exhausted retry cap reschedules it. Give the user an explicit "retry" action: this clears the recorded failure, resets the attempt counter, and starts a fresh upload if the network is available.
+
+```swift
+Arpalus.retryUpload(sessionId: sessionId) { result in
+    // .failure(.session(.notFound)) if the id is unknown
+}
+
+public static func retryUpload(
+    sessionId: String,
+    completion: @escaping (Result<Void, ArpalusError>) -> Void
+)
 ```
 
 ### ActiveSession
@@ -445,9 +733,11 @@ public struct ActiveSession {
     public let storeId: String
     public let aisleId: String
     public let scanCount: Int
+    public let scanIds: [String]                  // identifiers of the scans captured so far
     public let startDate: Date
     public let uploadState: String
-    // uploadState: "active", "pending", "uploading", "uploaded"
+    // uploadState: "active", "pending", "uploading", "uploaded", "failed"
+    public let uploadFailure: UploadFailureInfo?  // populated when uploadState == "failed"
 }
 ```
 
@@ -459,6 +749,28 @@ public struct ActiveSession {
 | `Arpalus.getSDKVersion()` | `String` | Returns the SDK version string (e.g., `"1.2(3)"`). |
 | `Arpalus.getSessionsFolderSize()` | `Double` | Returns total local session storage in megabytes. |
 | `Arpalus.clearSessionFolder()` | `Void` | Deletes all local session data. Pending uploads will be lost. |
+
+### Finishing Background Uploads
+
+Resumable uploads continue while your app is suspended. For them to finish, forward the system's background-session relaunch event from your `AppDelegate`. The call returns `true` only when the identifier belongs to the SDK's own background session, so apps that run their own background sessions can still handle theirs:
+
+```swift
+func application(_ application: UIApplication,
+                 handleEventsForBackgroundURLSession identifier: String,
+                 completionHandler: @escaping () -> Void) {
+    guard Arpalus.handleBackgroundURLSessionEvents(identifier: identifier,
+                                                   completion: completionHandler) else {
+        // Not an Arpalus session — handle your own background session here.
+        return
+    }
+}
+
+@discardableResult
+public static func handleBackgroundURLSessionEvents(
+    identifier: String,
+    completion: @escaping () -> Void
+) -> Bool
+```
 
 ### Backend Environment
 
@@ -733,8 +1045,19 @@ When displaying these modals, use the `ScanControlsInput` methods to handle user
 | `PlanInfo` | struct | Optional planogram info attached to an aisle. |
 | `ScanResult` | struct | Summary of a completed scan. |
 | `ActiveSession` | struct | Snapshot of a session's state and upload progress. |
-| `UploadInfo` | struct | Overall upload state plus per-session progress. |
-| `UploadState` | enum | Upload pipeline state: `idle`, `uploading`, `paused`. |
+| `UploadInfo` | struct | Overall upload state, per-session progress, and per-session failures. |
+| `UploadState` | enum | Upload pipeline state: `idle`, `uploading`, `paused`, `failed`. |
+| `UploadFailureInfo` | struct | Details of an upload failure (code, message, retryability). |
+| `ArpalusError` | enum | Structured error returned by every completion handler (`code`, `message`). |
+| `DetectorOption` | struct | A selectable detector for an aisle (per-category projects). |
+| `RequiredModelsManifest` | struct | Model set the active project requires, plus cache state. |
+| `ModelDescriptor` | struct | A single model file to download (or already cached). |
+| `ModelDownloadProgress` | enum | Progress events while `downloadRequiredModels` runs. |
+| `ModelDownloadViewController` | class | Built-in model-download progress UI. |
+| `ScanEvent` | enum | User-visible events emitted during a scan via `ScanViewController.scanEvents`. |
+| `ScanError` | enum | Error payload of `ScanEvent.scanError`. |
+| `ScanDetection` | struct | A single product detection (normalized center + dimensions). |
+| `ScanDetectionImage` | struct | Image a set of `ScanDetection`s belongs to. |
 | `ScanState` | enum | Current scan state: `idle`, `calibrating`, `scanning`, `saving`. |
 | `CalibrationProgress` | struct | Calibration point progress during `calibrating` state. |
 | `WarningType` | enum | Types of guidance warnings during scanning. |
@@ -763,18 +1086,7 @@ No additional code is required to enable offline support — it works transparen
 
 ## 18. Error Handling
 
-Every asynchronous SDK action reports failure through its completion handler as a `Result<T, Error>`:
-
-- `authenticate(token:completion:)`
-- `login(email:password:completion:)`
-- `initialize(clientId:projectId:completion:)`
-- `startSession(…:completion:)`
-- `endAndUploadSession(sessionId:completion:)`
-- `getScanViewController(…:completion:)`
-
-`cancelSession(sessionId:)` does not report errors.
-
-Errors are surfaced as the standard Swift `Error`. Handle the `.failure` case and read `error.localizedDescription` for a human-readable message:
+As of 2.1.6, every asynchronous SDK action reports failure through its completion handler as a structured **`ArpalusError`** — `Result<T, ArpalusError>` — instead of a bare `Error`. `ArpalusError` exposes a **stable, machine-readable `code`** and a human-readable `message`, so you can branch on the failure programmatically:
 
 ```swift
 Arpalus.startSession(
@@ -786,44 +1098,74 @@ Arpalus.startSession(
 ) { result in
     switch result {
     case .success(let sessionId):
-        // proceed
-        break
+        break // proceed
     case .failure(let error):
-        print("Arpalus error: \(error.localizedDescription)")
-        // Identify the condition from the message text (see table below).
+        switch error.code {
+        case "auth.unauthorized":
+            presentSignIn()                       // session expired — re-login
+        case "resources.insufficientStorage":
+            promptFreeUpStorage()
+        default:
+            showAlert(error.message)              // human-readable fallback
+        }
     }
 }
 ```
 
-> **Note:** SDK 2.1.5 does not expose stable, machine-readable error codes. Identify a failure by the condition / message described below, and use `localizedDescription` for logs and user-facing fallback text.
+`ArpalusError` is an enum grouped into failure categories, each with its own stable code:
 
-### Error Reference
+```swift
+public indirect enum ArpalusError: Error, LocalizedError {
+    case auth(AuthFailure)
+    case configuration(ConfigurationFailure)
+    case network(NetworkFailure)
+    case session(SessionFailure)
+    case device(DeviceFailure)
+    case unexpected(underlying: Error)
 
-| Condition | `localizedDescription` | When it occurs | Recommended action |
+    public var code: String { get }                  // e.g. "auth.unauthorized"
+    public var message: String { get }               // human-readable
+    public var recoverySuggestion: String? { get }
+    public var underlyingDescription: String? { get }
+    public var isRetryable: Bool { get }
+}
+```
+
+> The completion-based `cancelSession(sessionId:completion:)` and `retryUpload(sessionId:completion:)` also deliver `ArpalusError` (typically `session.notFound`). The deprecated `cancelSession(sessionId:)` (no completion) reports nothing.
+
+### Error Code Reference
+
+| `code` | `message` (example) | When it occurs | Recommended action |
 | :--- | :--- | :--- | :--- |
-| Configuration error | `Configuration error occurred`, or a specific detail such as `Missing client ID`, `Missing user ID`, `Session not found or not active: <id>`, `Invalid base URL`, or `Failed to save configuration` | Calling actions out of order or with invalid identifiers, referencing an unknown/inactive session, configuration fetch/save failures, or recognition-model download/compile failures | Authenticate and `initialize` before scanning; verify client/project/store/aisle and session identifiers; retry on a stable connection |
-| Unauthorized | `Unauthorized Access` | Access token, refresh token, or credentials were missing or rejected | Authenticate again before retrying |
-| Resource not found | `Resource Not Found` | A requested server resource was not found | Verify the identifiers used for the request |
-| Server error | `Server Error (<code>)` | Backend returned a server-side (5xx) error | Retry later; contact Arpalus support if it persists |
-| Network error | `Network Error: <detail>` — e.g. `Network Error: Cannot connect to host`, `Network Error: Invalid or unexpected response type`, `Network Error: Upload failed with status code: <n>` | Device is offline, transport failed, an unexpected response was received, or a background upload failed | Retry when connectivity returns |
-| HTTP error | `HTTP Error (<statusCode>)` | Server returned a non-success HTTP status | Inspect the status code; retry if appropriate |
-| Missing permissions | `Missing Permissions: <list>` — e.g. `CheckPermissions: Camera access denied`, `CheckPermissions: Location access restricted or denied` | Required camera or location permission is denied or restricted (checked before scanning) | Grant the required permissions in iOS Settings and retry |
-| Missing resources | `Missing Resources: <list>` — e.g. `CheckResources: ARKit capability is not supported`, `CheckResources: Not enough ram`, `CheckResources: not enough disk space`, `CheckResources: Disk capacity is unavailable` | A required device capability or resource is unavailable (checked before scanning) | Use a supported physical device; close other apps to free memory; free device storage |
-| Location error | `Location Error` | A location-related failure occurred | Check location permission/services and retry |
-| Wrapped / underlying error | `Error: <underlying message>` | A lower-level system or Vision/CoreML error was wrapped by the SDK; raw `URLError` or decoding errors may also surface directly | Inspect the underlying message; retry and share it with support if it persists |
-| Scan view creation failed | `Failed to create ScanViewController: <detail>` | The scan UI could not be created | Verify session state, permissions, device resources, and that initialization succeeded |
+| `auth.unauthorized` | `Unauthorized access` | Token/credentials missing or rejected; auth session expired or cleared | Re-authenticate (or `restoreSession`); observe `onSessionExpired` to catch this globally |
+| `auth.offlineCredentialsUnavailable` | `…` | Offline, but no valid cached credentials to authenticate with | Reconnect and authenticate online at least once |
+| `auth.noActiveSession` | `No active session to restore; sign in first` | `restoreSession` with nothing cached | Route the user to sign-in |
+| `configuration.invalid` / `configuration.missing` / `configuration.notFound` | `…` | Called out of order, missing/invalid project configuration | `authenticate` + `initialize` before scanning; verify identifiers |
+| `model.downloadFailed` / `model.compileFailed` | `Failed to download/compile model <name>` | A required CoreML model couldn't be fetched or compiled | Retry on a stable connection; free storage |
+| `network.unavailable` / `network.error` / `network.invalidResponse` | `…` | Device offline, transport failed, or an unexpected response | Retry when connectivity returns |
+| `http.error` / `http.notFound` / `http.serverError` | `HTTP request failed with status code <n>` / `Resource not found` / `Server error (<n>)` | Server returned a non-success or 5xx status | Inspect the status; retry later; contact support if it persists |
+| `permissions.denied` | `Missing Permissions: …` | Camera/location permission denied or restricted (checked before scanning) | Ask the user to grant permissions in iOS Settings |
+| `resources.unsupportedDevice` / `resources.lowMemory` / `resources.insufficientStorage` / `resources.unavailable` | `Missing Resources: …` | A required capability/resource is unavailable (checked before scanning) | Use a supported physical device; free memory/storage |
+| `storage.writeFailed` | `…` | Writing session data to disk failed | Free storage and retry |
+| `session.notFound` / `session.notActive` | `Session not found: <id>` / `Session is not active: <id>` | Unknown or non-active session id | Verify the `sessionId` and session state |
+| `session.createFailed` | `…` | `startSession` failed — inspect the underlying cause (often `auth.unauthorized`) | Branch on the cause; re-login if auth expired |
+| `session.uploadFailed` | `Session upload failed: <id>` | A background upload failed (surfaced via `getUploadInfo()`) | Offer `retryUpload(sessionId:)` |
+| `scan.detectionUnavailable` | `Computer-vision detection is unavailable` | Detection setup failed | Verify models downloaded; retry |
+| `scan.viewCreationFailed` | `…` | The scan UI could not be created | Verify session state, permissions, resources, and that `initialize` succeeded |
+| `unknown` | `…` | A lower-level system / Vision / CoreML error was wrapped | Inspect `underlyingDescription`; share with support if it persists |
 
 ### Errors by API
 
-| API | Conditions it can surface |
+| API | Codes it can surface |
 | :--- | :--- |
-| `authenticate` / `login` | Unauthorized, Network error, HTTP error, Server error, Configuration error |
-| `initialize` | Configuration error, Network/HTTP/Server error, Missing permissions, Missing resources |
-| `startSession` | Configuration error (`Missing client ID` / `Missing user ID`); Wrapped / underlying error if the session directory cannot be created on disk |
-| `getScanViewController` | Configuration error, Missing permissions, Missing resources, Scan view creation failed |
-| `endAndUploadSession` | Configuration error (`Session not found or not active: <id>`) — upload failures are **not** delivered here; see note below |
+| `authenticate` / `login` / `restoreSession` | `auth.unauthorized`, `auth.offlineCredentialsUnavailable`, `network.*`, `http.*`, `unknown` (`login` adds `configuration.invalid`; `restoreSession` adds `auth.noActiveSession`) |
+| `initialize` | `configuration.*`, `model.downloadFailed`, `model.compileFailed`, `network.*`, `http.*`, `unknown` |
+| `startSession` | `session.createFailed` (cause: `auth.unauthorized`, `configuration.*`, `storage.writeFailed`, `resources.insufficientStorage`, …) |
+| `getScanViewController` | `session.notFound`, `session.notActive`, `permissions.denied`, `resources.*`, `scan.viewCreationFailed` |
+| `endAndUploadSession` | `session.notFound`, `session.notActive`, `storage.writeFailed`, `resources.insufficientStorage`, `unknown` — upload *delivery* failures are **not** delivered here; see note below |
+| `cancelSession` / `retryUpload` | `session.notFound` |
 
-> **Upload outcomes are not reported through `endAndUploadSession`.** Its completion fires with `.success` as soon as the upload is dispatched; it only fails with a Configuration error when the session is missing or not active. To observe whether the upload actually succeeds, retries, or fails, subscribe to `getUploadInfo()` (see [§10. Monitoring Upload Progress](#10-monitoring-upload-progress)) and track the per-session `UploadState`.
+> **Upload outcomes are not reported through `endAndUploadSession`.** Its completion fires with `.success` as soon as the upload is dispatched. To observe whether the upload actually succeeds, retries, or fails, subscribe to `getUploadInfo()` (see [§10. Monitoring Upload Progress](#10-monitoring-upload-progress)) and track `UploadState` / `info.failures`. Terminal failures don't retry automatically — offer the user `retryUpload(sessionId:)`.
 
 ## 19. Best Practices
 

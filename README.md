@@ -42,7 +42,7 @@ git@github.com:Arpalus-dev/spm-distribution.git
 Or add it directly to your `Package.swift`:
 
 ```swift
-.package(url: "git@github.com:Arpalus-dev/spm-distribution.git", from: "2.1.5")
+.package(url: "git@github.com:Arpalus-dev/spm-distribution.git", from: "2.1.6")
 ```
 
 ### 3. Declare camera usage
