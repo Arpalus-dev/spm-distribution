@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 _Changes that have not yet been released will be listed here._
 
+## [2.1.7] — 2026-06-23
+
+### Added
+- **Expired upload links are now a distinct, non-retryable failure.** A resumable upload URL is only valid for a limited window (~8h); once it lapses the resumable `PUT` is rejected (`401`/`403`) and the upload fails terminally with `UploadFailureInfo.causeCode == "upload.urlExpired"`. Surface this as a separate "Expired" status — distinct from an ordinary retryable failure — so the user knows a fresh `retryUpload(sessionId:)` (which re-zips and fetches a new URL) is required.
+
+### Fixed
+- **Resumable upload could get stuck in a `409 Conflict` loop** after a prior `4xx` on the `PUT`. The uploader now reconciles against the server's committed byte offset (or restarts the upload) instead of replaying the same stale request.
+- **Reuse the persisted resumable upload URL across retries** instead of re-requesting one on every attempt; an expired URL is marked stale and re-fetched on the next try rather than driving the `409` loop.
+- **`SIGSEGV` in `BackgroundUploadManager`** — concurrent mutation of upload-task state is now serialized behind a lock.
+- **Zip failures are classified by actual free space** — a genuine out-of-space condition is reported as a terminal storage failure, with more granular zip error details.
+
 ## [2.1.6] — 2026-06-18
 
 ### Added
@@ -67,7 +78,8 @@ Initial 2.x release. Major rewrite covering:
 - New session management API: `startSession` / `getScanViewController(sessionId:)` / `endAndUploadSession` / `cancelSession` / `listActiveSessions`.
 - Resumable background uploads with `getUploadInfo()` Combine publisher.
 
-[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.6...HEAD
+[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.7...HEAD
+[2.1.7]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.6...v2.1.7
 [2.1.6]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.5...v2.1.6
 [2.1.5]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.3...v2.1.5
 [2.1.3]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.2...v2.1.3

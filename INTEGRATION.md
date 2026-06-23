@@ -677,6 +677,8 @@ public struct UploadFailureInfo: Codable, Equatable {
 }
 ```
 
+> **Expired upload link (`causeCode == "upload.urlExpired"`).** A resumable upload URL is only valid for a limited window (~8h). Once it lapses, the resumable `PUT` is rejected (`401`/`403`) and the upload becomes a **terminal, non-retryable** failure carrying `causeCode == "upload.urlExpired"`. Treat this as a distinct **"Expired"** status, separate from an ordinary retryable failure — a fresh `retryUpload(sessionId:)` re-zips the session and fetches a new upload URL.
+
 > **Only *terminal* failures pin the `.failed` state.** A session marked `.failed` (a non-retryable error, or one that exhausted the retry cap) won't upload again without user action — call [`retryUpload(sessionId:)`](#11-session-management). Transient failures that the SDK is still auto-retrying don't change `state`; their details still appear in `info.failures`.
 
 ## 11. Session Management
