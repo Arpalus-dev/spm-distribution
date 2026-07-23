@@ -170,6 +170,10 @@ public struct AuthResponse: Codable, Equatable {
     public let accessKeyName: String?
 
     public let clients: [String: Client]?  // Key: client ID
+
+    /// Minimum host-app version the backend allows, e.g. "1.0.22" (wire key: `min_version`).
+    /// Informational only — the SDK never enforces it. `nil`/empty means "no gate".
+    public let minAppVersion: String?
 }
 
 public struct User: Codable, Equatable {
@@ -269,6 +273,7 @@ public struct Aisle: Codable, Equatable {
 public struct PlanInfo: Codable, Equatable {
     public let version: String
     public let products: [String: Int]
+    public let imageUrl: URL?   // Signed link to the aisle's planogram image; nil when absent
 }
 ```
 
@@ -594,6 +599,8 @@ public static func endAndUploadSession(
 
 > **Failure codes:** `session.notFound`, `session.notActive`, `storage.writeFailed`, `resources.insufficientStorage`, `unknown`. Upload *delivery* failures are **not** reported here — observe them via `getUploadInfo()` (see [§10](#10-monitoring-upload-progress)).
 
+> **Idempotent since 2.1.8.** Calling this again for a session that was already ended (`pending`, `uploading`, or `uploaded`) reports success again, so a double-tap or a retried call is harmless. `session.notActive` now means only that a previous upload failed terminally — offer [`retryUpload(sessionId:)`](#11-session-management) instead.
+
 This method performs the following:
 
 1. Writes final scan logs to disk.
@@ -673,11 +680,19 @@ public struct UploadFailureInfo: Codable, Equatable {
     public let isRetryable: Bool
     /// `true` when the error was retryable but the SDK stopped after exhausting its retry cap.
     public let attemptsExhausted: Bool
+    /// `true` when the scan can no longer be uploaded because time ran out —
+    /// `causeCode` is either "session.expired" or "upload.urlExpired".
+    public var isExpired: Bool { get }
     // Plus the originating cause: causeCode / causeMessage / causeRecoverySuggestion / causeUnderlyingDescription.
 }
 ```
 
-> **Expired upload link (`causeCode == "upload.urlExpired"`).** A resumable upload URL is only valid for a limited window (~8h). Once it lapses, the resumable `PUT` is rejected (`401`/`403`) and the upload becomes a **terminal, non-retryable** failure carrying `causeCode == "upload.urlExpired"`. Treat this as a distinct **"Expired"** status, separate from an ordinary retryable failure — a fresh `retryUpload(sessionId:)` re-zips the session and fetches a new upload URL.
+> **Expired scans (`isExpired == true`).** Two distinct causes end a scan's life:
+>
+> - **`causeCode == "session.expired"`** — the scan aged past the project's **scan-expiry window** (backend-configured, default 8h from session start). Company policy is that stale shelf data isn't wanted, so the scan is retired and its local data deleted. This is **terminal**: `retryUpload(sessionId:)` refuses it with `ArpalusError.session(.expired)` (`code == "session.expired"`).
+> - **`causeCode == "upload.urlExpired"`** — the resumable upload URL is dead (rejected with `401`/`403`, or the resumable session returned `410 Gone`). Also terminal; a fresh `retryUpload(sessionId:)` re-zips the session and fetches a new upload URL.
+>
+> Render both as a distinct **"Expired"** status rather than a generic failure, and suggest re-scanning if the data is still needed. Branch on `causeCode` if you want different copy for the two. `listActiveSessions()` sweeps expired sessions before returning, so a list built from it never shows a live-looking `"pending"` for a scan that can no longer upload.
 
 > **Only *terminal* failures pin the `.failed` state.** A session marked `.failed` (a non-retryable error, or one that exhausted the retry cap) won't upload again without user action — call [`retryUpload(sessionId:)`](#11-session-management). Transient failures that the SDK is still auto-retrying don't change `state`; their details still appear in `info.failures`.
 
@@ -718,6 +733,7 @@ A failed upload (surfaced as `UploadState.failed` via `getUploadInfo()`) is **no
 ```swift
 Arpalus.retryUpload(sessionId: sessionId) { result in
     // .failure(.session(.notFound)) if the id is unknown
+    // .failure(.session(.expired)) if the scan aged past the scan-expiry window
 }
 
 public static func retryUpload(
@@ -725,6 +741,8 @@ public static func retryUpload(
     completion: @escaping (Result<Void, ArpalusError>) -> Void
 )
 ```
+
+> **Don't offer retry for an expired scan.** When the failure's `isExpired` is `true`, retrying is refused — a scan retired by the scan-expiry window fails with `session.expired` (its local data is already deleted). Hide the retry affordance in that case and suggest re-scanning. See [§10](#uploadinfo--uploadstate).
 
 ### ActiveSession
 
@@ -1044,12 +1062,12 @@ When displaying these modals, use the `ScanControlsInput` methods to handle user
 | `Hierarchy` | struct | Project configuration with stores and aisles. |
 | `Store` | struct | A store location containing aisles. |
 | `Aisle` | struct | An aisle within a store. |
-| `PlanInfo` | struct | Optional planogram info attached to an aisle. |
+| `PlanInfo` | struct | Optional planogram info attached to an aisle (version, products, `imageUrl`). |
 | `ScanResult` | struct | Summary of a completed scan. |
 | `ActiveSession` | struct | Snapshot of a session's state and upload progress. |
 | `UploadInfo` | struct | Overall upload state, per-session progress, and per-session failures. |
 | `UploadState` | enum | Upload pipeline state: `idle`, `uploading`, `paused`, `failed`. |
-| `UploadFailureInfo` | struct | Details of an upload failure (code, message, retryability). |
+| `UploadFailureInfo` | struct | Details of an upload failure (code, message, retryability, `isExpired`). |
 | `ArpalusError` | enum | Structured error returned by every completion handler (`code`, `message`). |
 | `DetectorOption` | struct | A selectable detector for an aisle (per-category projects). |
 | `RequiredModelsManifest` | struct | Model set the active project requires, plus cache state. |
@@ -1085,6 +1103,8 @@ The SDK supports offline operation after at least one successful online session:
 - **Session upload** — Scan data is persisted locally and uploaded automatically when connectivity is restored. Uploads resume in the background.
 
 No additional code is required to enable offline support — it works transparently.
+
+> **Offline data doesn't wait forever.** A scan that stays unuploaded past the project's scan-expiry window (backend-configured, default 8h from session start) is retired rather than uploaded — see [§10](#uploadinfo--uploadstate). Encourage users to get back online the same shift.
 
 ## 18. Error Handling
 
@@ -1133,7 +1153,7 @@ public indirect enum ArpalusError: Error, LocalizedError {
 }
 ```
 
-> The completion-based `cancelSession(sessionId:completion:)` and `retryUpload(sessionId:completion:)` also deliver `ArpalusError` (typically `session.notFound`). The deprecated `cancelSession(sessionId:)` (no completion) reports nothing.
+> The completion-based `cancelSession(sessionId:completion:)` and `retryUpload(sessionId:completion:)` also deliver `ArpalusError` (typically `session.notFound`; `retryUpload` adds `session.expired`). The deprecated `cancelSession(sessionId:)` (no completion) reports nothing.
 
 ### Error Code Reference
 
@@ -1149,7 +1169,8 @@ public indirect enum ArpalusError: Error, LocalizedError {
 | `permissions.denied` | `Missing Permissions: …` | Camera/location permission denied or restricted (checked before scanning) | Ask the user to grant permissions in iOS Settings |
 | `resources.unsupportedDevice` / `resources.lowMemory` / `resources.insufficientStorage` / `resources.unavailable` | `Missing Resources: …` | A required capability/resource is unavailable (checked before scanning) | Use a supported physical device; free memory/storage |
 | `storage.writeFailed` | `…` | Writing session data to disk failed | Free storage and retry |
-| `session.notFound` / `session.notActive` | `Session not found: <id>` / `Session is not active: <id>` | Unknown or non-active session id | Verify the `sessionId` and session state |
+| `session.notFound` / `session.notActive` | `Session not found: <id>` / `Session is not active: <id>` | Unknown session id, or a session whose upload already failed terminally | Verify the `sessionId`; for `notActive` offer `retryUpload(sessionId:)` |
+| `session.expired` | `This scan expired before it could be uploaded` | The scan aged past the project's scan-expiry window and was retired without uploading | Terminal — show an "Expired" status and suggest re-scanning; don't offer retry |
 | `session.createFailed` | `…` | `startSession` failed — inspect the underlying cause (often `auth.unauthorized`) | Branch on the cause; re-login if auth expired |
 | `session.uploadFailed` | `Session upload failed: <id>` | A background upload failed (surfaced via `getUploadInfo()`) | Offer `retryUpload(sessionId:)` |
 | `scan.detectionUnavailable` | `Computer-vision detection is unavailable` | Detection setup failed | Verify models downloaded; retry |
@@ -1165,7 +1186,8 @@ public indirect enum ArpalusError: Error, LocalizedError {
 | `startSession` | `session.createFailed` (cause: `auth.unauthorized`, `configuration.*`, `storage.writeFailed`, `resources.insufficientStorage`, …) |
 | `getScanViewController` | `session.notFound`, `session.notActive`, `permissions.denied`, `resources.*`, `scan.viewCreationFailed` |
 | `endAndUploadSession` | `session.notFound`, `session.notActive`, `storage.writeFailed`, `resources.insufficientStorage`, `unknown` — upload *delivery* failures are **not** delivered here; see note below |
-| `cancelSession` / `retryUpload` | `session.notFound` |
+| `cancelSession` | `session.notFound` |
+| `retryUpload` | `session.notFound`, `session.expired` |
 
 > **Upload outcomes are not reported through `endAndUploadSession`.** Its completion fires with `.success` as soon as the upload is dispatched. To observe whether the upload actually succeeds, retries, or fails, subscribe to `getUploadInfo()` (see [§10. Monitoring Upload Progress](#10-monitoring-upload-progress)) and track `UploadState` / `info.failures`. Terminal failures don't retry automatically — offer the user `retryUpload(sessionId:)`.
 

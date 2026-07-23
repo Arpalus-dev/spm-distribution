@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 _Changes that have not yet been released will be listed here._
 
+## [2.1.8] — 2026-07-23
+
+### Added
+- **Scan-expiry window.** Scans that age past the project's expiry window (backend-configured, default 8h from session start) are retired instead of uploaded. The session becomes terminally `.failed` with `UploadFailureInfo.causeCode == "session.expired"`, its local data is deleted, and `retryUpload(sessionId:)` refuses it with the new `ArpalusError.session(.expired)` (`code == "session.expired"`). `listActiveSessions()` sweeps expired sessions before returning, so the list never shows a live-looking `"pending"` for a scan that can no longer upload.
+- **`UploadFailureInfo.isExpired`** — `true` when a scan can no longer be uploaded because time ran out: either the scan-expiry window elapsed (`session.expired`) or its one-time upload link expired (`upload.urlExpired`). Render these as **"Expired"** rather than a generic failure, hide the retry affordance, and suggest re-scanning.
+- **`AuthResponse.minAppVersion`** — the minimum host-app version the backend allows. Purely informational: the SDK never enforces it and carries it through like `user.role`, so hosts that want a version gate can implement one. `nil`/empty means "no gate".
+- **Per-image compass heading.** Saved frames now record the heading of the camera's optical axis in their image metadata (`compass.heading` in degrees clockwise from north, `compass.headingAccuracy`, `compass.headingReference`). Heading is `-1` when no north reference is available. No API change — this improves the data uploaded for backend processing.
+- **Person flagging on saved frames** is now driven by the project config, and each saved image records a `person` flag in its metadata.
+
+### Changed
+- **`endAndUploadSession(sessionId:completion:)` is now idempotent.** Calling it again for a session that was already ended — `pending`, `uploading`, or `uploaded` — reports success again instead of failing with `session.notActive`. `session.notActive` is now returned only when a previous upload failed terminally (use `retryUpload(sessionId:)`).
+- **Dead upload links are detected earlier and more broadly.** The uploader probes the resumable upload session's status before sending: an upload the server already committed is healed and marked uploaded, and a `410 Gone` resumable session now also counts as an expired link (`causeCode == "upload.urlExpired"`) alongside `401`/`403`, so a dead URL fails fast instead of burning retries.
+
+### Fixed
+- **Memory leak on repeated scans** — the AR scene view and its session delegate are now released when the scan view controller goes away.
+- **Model download crash/failure under concurrency** — two downloads of the same model no longer race when moving the file into the cache.
+- **A session that already reached `.uploaded` can no longer be resurrected** by a late or duplicate failure callback (which previously re-queued an upload whose local files were gone, failing forever). `.uploaded` is also persisted before the session's files are deleted, so an interruption mid-cleanup can't lose the record.
+- **Cancelled report fetches are no longer reported as errors** (e.g. the app backgrounded mid-poll), and a failed report payload decodes instead of throwing.
+- **`min_version` is no longer cached across a token refresh**, so a changed backend value takes effect.
+
 ## [2.1.7] — 2026-06-23
 
 ### Added
@@ -78,7 +98,8 @@ Initial 2.x release. Major rewrite covering:
 - New session management API: `startSession` / `getScanViewController(sessionId:)` / `endAndUploadSession` / `cancelSession` / `listActiveSessions`.
 - Resumable background uploads with `getUploadInfo()` Combine publisher.
 
-[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.7...HEAD
+[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.8...HEAD
+[2.1.8]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.7...v2.1.8
 [2.1.7]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.6...v2.1.7
 [2.1.6]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.5...v2.1.6
 [2.1.5]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.3...v2.1.5
