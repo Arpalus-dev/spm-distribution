@@ -1,8 +1,8 @@
 // swift-tools-version:5.7
 import PackageDescription
 
-let version = "2.1.7"
-let checksum = "6fd1051189b6f9ff6dcdc2df72680cf318de062e5c94a57089f3b4f64b50d703"
+let version = "2.1.8"
+let checksum = "c5e4f5c3f337f31f3874df58ea146d32e9ed1370d8cc700c0c6b6f87725c242a"
 
 let package = Package(
     name: "ArpalusSDK",
