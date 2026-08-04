@@ -499,8 +499,12 @@ public static func getScanViewController(
 `ScanViewController` exposes a stream of user-visible events emitted while an individual scan is running — useful for driving a custom overlay or analytics. Consume it as an `AsyncStream` or a Combine publisher:
 
 ```swift
+// Grab the stream first, so the Task captures only the stream —
+// NOT the view controller (see the warning below).
+let events = scanViewController.scanEvents
+
 Task {
-    for await event in scanViewController.scanEvents {
+    for await event in events {
         switch event {
         case .scanStateChanged(let state): updateUI(state)
         case .calibrationProgressChanged(let progress): show(progress)
@@ -512,6 +516,8 @@ Task {
     }
 }
 ```
+
+> **Warning — never capture the view controller inside the task.** Writing `for await event in scanViewController.scanEvents { ... }` directly inside a `Task` closure holds a strong reference to the `ScanViewController` for the lifetime of the loop — and the stream only finishes when the controller deinitializes. Neither can release the other, so the whole scanner (view controller, AR session, camera resources) leaks after dismissal. Capture the stream in a local constant as shown above, or cancel the task yourself when the scanner is dismissed.
 
 ```swift
 public enum ScanEvent: Equatable {
