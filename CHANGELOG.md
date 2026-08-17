@@ -8,6 +8,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 _Changes that have not yet been released will be listed here._
 
+## [3.0.1] — 2026-08-16
+
+The headline change is that **scanning is now uniform and models are optional**. There is one scanning flow for every aisle, the generic "General Product" detector is an ordinary configured detector rather than a privileged fallback, and a project may ship no models at all. Most of this surfaces as behavior rather than API, but two host-visible contracts changed — see **Changed** below.
+
+### Added
+
+- **`Arpalus.allowsUserSegments`** — whether the active project lets one session hold several scans ("segments"). When `false`, the SDK's own scan screen already enforces one scan per session (the "Done" button is hidden and stopping the scan ends the session). Host apps should read this to suppress their own "scan again into this session" affordances and call `endAndUploadSession` after the single scan.
+- **Stable track ids on uploaded detections.** `ScanDetection.id` is now the tracked-product id: the same physical product carries the same id across every saved image in a session, so downstream consumers can group a product's appearances without re-matching boxes.
+- **Real SKUs in the detection payload.** When the project configures classifiers, each save-time detector crop is classified and `ScanDetection.name` carries the resulting product SKU tag, resolved in three tiers — the frame's classifier top-1 when it clears the configured confidence threshold, otherwise the tracked box's accumulated (dominance-gated) voted SKU, otherwise the fixed default tag `"101000000000000000"`. `ScanDetection.categoryName` remains the detector class label. Projects with no classifiers behave as before: the default tag everywhere.
+- **Per-scan `DebugLog.txt` in the uploaded zip**, so a scan captured in the field can be diagnosed after the fact.
+- **Lens-quality signals in image metadata.** Each saved image's `blurScore` now also accounts for a dirty or smudged lens (Apple's lens-smudge detection on iOS 26+, a classical estimate below it) and for lens flare. No API change — this improves the data uploaded for backend processing.
+
+### Changed
+
+- **`availableDetectors(forAisleCvCategory:)` no longer appends a generic "General Product" fallback.** It returns exactly the detectors configured for that CV category, and **may be empty**. An empty result means the aisle runs no computer vision — present it as a capture-only scan, not an error. The generic detector still appears when it is genuinely configured for the category (and `DetectorOption.isGeneric` still labels it).
+- **`ScanEvent.productsDetected` is no longer tied to an "edge-compute" flow.** It is emitted for any aisle that has configured detectors, once per saved image.
+- **Models never gate initialization or scanning.** `initialize` (online and offline), `downloadRequiredModels`, and `prepareDetectors` all succeed as no-ops for a project with no models. A capture-only project is a valid configuration: AR calibration, coverage, and image capture work with no CV at all.
+- **The stop-time scan-validity gate applies only to scans that run a detector.** The "Not Enough Data" sheet (`ScanModal.insufficientData`, driven by the minimum images / minimum duration / minimum detections thresholds) is skipped entirely for a capture-only scan, which saves directly.
+- **`clearSessionFolder()` no longer deletes data out from under a running upload.** It clears the local scan data of every session waiting to upload and drops their records; a session whose archive is actually being streamed is left alone and cleaned up when the upload finishes. Already-uploaded sessions keep their records for the host's session list.
+- **Calibration effort is backend-configurable**, so the number of stable frames required before an origin is computed can be tuned per project.
+- **Telemetry and crash metadata identify the user by a hashed id** instead of the raw email address or access-key name.
+
+### Fixed
+
+- **A session's files could be deleted while its zip was still being written**, failing the upload with an `ENOENT` / `openArchive` error. Session records and the right to delete their files now have a single owner, and an in-flight zip or upload holds a lease that defers any deletion until it completes.
+- **Two products could share one track id.** Detections are now matched one-to-one per frame, so ids stay distinct.
+- **Re-anchoring the AR origin no longer kills tracked boxes en masse** — the re-projection is applied completely.
+- **Box-in-box duplicate detections** that survived the model's own suppression are now removed by a post-detection NMS pass.
+- **Tracked box positions converge instead of drifting** — adaptive position refinement, a depth-band shelf fit for deep displays (fitting a band rather than a line), and a comparative gate that only replaces a shelf fit when the new one genuinely beats the incumbent.
+- **The saved-image counter is committed synchronously with the image write**, so a scan's image count can no longer disagree with what was written to disk.
+
+### Removed
+
+- **The legacy per-version `models` dictionary is no longer read.** `models_v2` is the only model configuration format.
+- **The legacy detection payload** (a scan-end snapshot of tracked boxes back-projected onto each saved image) is gone. Per-image detections come from the save-time detector run described above.
+
 ## [2.1.8] — 2026-07-23
 
 ### Added
@@ -98,7 +134,8 @@ Initial 2.x release. Major rewrite covering:
 - New session management API: `startSession` / `getScanViewController(sessionId:)` / `endAndUploadSession` / `cancelSession` / `listActiveSessions`.
 - Resumable background uploads with `getUploadInfo()` Combine publisher.
 
-[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.8...HEAD
+[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v3.0.1...HEAD
+[3.0.1]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.8...v3.0.1
 [2.1.8]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.7...v2.1.8
 [2.1.7]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.6...v2.1.7
 [2.1.6]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.5...v2.1.6

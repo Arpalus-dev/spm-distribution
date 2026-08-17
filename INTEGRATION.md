@@ -14,6 +14,16 @@ The SDK handles the full scanning pipeline — 3D calibration, image capture, on
 
 All SDK interaction happens through the static methods on the `Arpalus` enum. There are no singleton instances to manage.
 
+### How Scanning Works
+
+There is a **single scanning flow** for every aisle. The detectors an aisle runs come from the project's `models_v2` configuration, keyed by the aisle's `cvCategory`:
+
+- The generic "General Product" detector is an ordinary configured detector. It downloads and runs like any other, and is **not** appended as an implicit fallback.
+- An aisle whose category has no configured detector runs **no computer vision**. AR calibration, coverage tracking, and image capture still work — the scan is a valid capture-only scan.
+- **Models are optional project-wide.** A project with no models at all is a supported configuration: `initialize`, `downloadRequiredModels`, and `prepareDetectors` all succeed as no-ops. Model presence never gates initialization or scanning.
+
+Within a scan, detectors run at two cadences: **live**, feeding the AR-tracked boxes drawn on screen, and **at save time**, once per saved image on the exact saved pixels. The save-time results are what gets written to the scan's `ScanInfo.json` and emitted as [`ScanEvent.productsDetected`](#observing-scan-events).
+
 ## 2. Prerequisites
 
 - An **Arpalus access key** provided by the Arpalus DevOps team
@@ -46,7 +56,7 @@ The diagram below shows the five-step integration flow from authentication to up
 │   initialize    │  Pass clientId + projectId
 └────────┬────────┘
          │ Returns: Hierarchy (stores and aisles)
-         │ Downloads & compiles ML models (first run)
+         │ Downloads & compiles ML models, if the project ships any (first run)
          ▼
 ┌─────────────────┐
 │  startSession   │  Pass store + aisle identifiers
@@ -221,6 +231,7 @@ Arpalus.initialize(clientId: clientId, projectId: projectId) { result in
 public static func initialize(
     clientId: String,
     projectId: String,
+    autoDownloadModels: Bool = true,
     completion: @escaping (Result<Hierarchy, ArpalusError>) -> Void
 )
 ```
@@ -229,16 +240,19 @@ public static func initialize(
 | :--- | :--- | :--- |
 | `clientId` | `String` | The client identifier from the `AuthResponse`. |
 | `projectId` | `String` | The project identifier selected from the client's projects. |
+| `autoDownloadModels` | `Bool` | Defaults to `true`: the completion does not fire until every required model is downloaded and compiled. Pass `false` to return as soon as the configuration is fetched and drive the download yourself (see below). |
 | `completion` | `Result<Hierarchy, ArpalusError>` | Called with the store/aisle hierarchy or a structured `ArpalusError`. |
 
 ### What Happens During Initialization
 
 1. Downloads project configuration (scan settings, thresholds) from the Arpalus server.
-2. Downloads CoreML model files if not already cached locally.
+2. Downloads CoreML model files if not already cached locally (when `autoDownloadModels` is `true`).
 3. Compiles CoreML models for the current device (first run only — cached afterward).
 4. Returns the `Hierarchy` containing the store and aisle structure.
 
 > **Note:** The first initialization on a device may take longer due to model download and compilation. Subsequent launches use cached models and are significantly faster.
+
+> **Models are optional.** A project that configures no models is a valid capture-only configuration — `initialize` succeeds with nothing to download, online or offline. Model presence never gates initialization or scanning.
 
 ### Hierarchy
 
@@ -277,9 +291,9 @@ public struct PlanInfo: Codable, Equatable {
 }
 ```
 
-### Downloading Models for Per-Category Detectors (Optional)
+### Downloading Models Explicitly (Optional)
 
-Some projects ship **per-category detectors** (the "models_v2" flow) — a dedicated detector per CV category instead of a single generic model. For these projects you can drive an explicit, user-visible model-download step before scanning. Projects that use only the classic/generic detector don't need any of this; models download silently.
+By default (`autoDownloadModels: true`) models download silently inside `initialize`. If you'd rather show the user an explicit download step — useful when a project ships several large per-category detectors — pass `autoDownloadModels: false` and drive it yourself with the API below.
 
 Use `hasDownloadableModels` after `initialize` to branch your UX:
 
@@ -287,7 +301,7 @@ Use `hasDownloadableModels` after `initialize` to branch your UX:
 public static var hasDownloadableModels: Bool { get }
 ```
 
-When `true`, present the manual download flow and observe `ScanViewController.scanEvents` for `.productsDetected` during scanning (see [§8](#8-step-4--present-the-scan-view-controller)). When `false`, skip the download screen entirely.
+When `true`, present the manual download flow and observe `ScanViewController.scanEvents` for `.productsDetected` during scanning (see [§8](#8-step-4--present-the-scan-view-controller)). When `false`, there is nothing to download — skip the download screen entirely.
 
 Inspect what the active project requires (and what's already cached) via `requiredModels()`:
 
@@ -348,9 +362,11 @@ public static func getModelDownloadViewController(
 ) -> ModelDownloadViewController?
 ```
 
+> **Nothing to download is not an error.** For a project with no models, `requiredModels()` returns an empty manifest (`isEmpty == true`), `hasDownloadableModels` is `false`, `getModelDownloadViewController` returns `nil`, and `downloadRequiredModels` completes successfully having done nothing.
+
 ## 7. Step 3 — Start a Scan Session
 
-Before presenting the scan camera, create a session. A session groups one or more individual scans together (e.g., scanning multiple shelf sections in the same aisle).
+Before presenting the scan camera, create a session. A session groups one or more individual scans together (e.g., scanning multiple shelf sections in the same aisle) — when the project allows it; see [Single-Scan Projects](#single-scan-projects) below.
 
 ```swift
 Arpalus.startSession(
@@ -396,6 +412,18 @@ public static func startSession(
 > **Why both `aisleId` and `displayId`?** `Aisle.id` is guaranteed unique per project, so the SDK uses it as the cache key when looking up the aisle's CV category. `Aisle.displayId` is the human-readable label that ends up in downstream reports. Passing both removes the ambiguity that occurred when multiple stores happened to share the same `displayId`.
 
 > **`userData`:** This dictionary is embedded in the session's scan logs and uploaded alongside the scan data. Use it to attach any metadata relevant to your workflow. Pass `[:]` if not needed.
+
+### Single-Scan Projects
+
+Whether a session may hold several scans is decided **per project**:
+
+```swift
+public static var allowsUserSegments: Bool { get }
+```
+
+Only meaningful after `initialize`. Projects (and cached configurations) that don't set it default to `true`.
+
+When it is `false`, the session is one scan long. The SDK's own scan screen already enforces this — the "Done" button is hidden, and stopping the scan ends the session and hands control straight back to your app. Read this property to keep your own UI consistent: suppress any "scan another section into this session" affordance and call `endAndUploadSession` once the single scan finishes.
 
 ## 8. Step 4 — Present the Scan View Controller
 
@@ -458,9 +486,9 @@ public final class ScanViewController: UIViewController {
 
 > **Important:** The `ScanViewController` manages its own AR session, camera feed, and UI. Present it full-screen and dismiss it in response to the `onScanFinished` or `onScanCancelled` callbacks.
 
-### Choosing a Detector (Per-Category Projects)
+### Choosing a Detector
 
-For projects with per-category detectors, you can let the user pick which detector runs for a scan. List the detectors available for an aisle's CV category (the "General Product" fallback is always appended):
+You can let the user pick which detector runs for a scan. `availableDetectors` returns exactly the detectors configured for that aisle's CV category — **no generic detector is appended**. The generic "General Product" detector appears only when it is genuinely configured for the category, in which case `isGeneric` labels it.
 
 ```swift
 public static func availableDetectors(forAisleCvCategory cvCategory: String?) -> [DetectorOption]
@@ -469,9 +497,11 @@ public struct DetectorOption: Equatable {
     public let id: String           // SDK-internal model name — pass to getScanViewController(detectorId:)
     public let displayName: String  // human label for the picker
     public let cvCategory: String
-    public let isGeneric: Bool       // true for the "General Product" fallback
+    public let isGeneric: Bool      // labels the "General Product" detector; no special behavior
 }
 ```
+
+> **An empty result is not an error.** It means the aisle has no configured detector and will run no computer vision. Skip the picker and present a normal, capture-only scan: AR calibration, coverage, and image capture all work, and the scan saves without any detection-count check.
 
 Optionally pre-download every detector available to the aisle when the user enters a session, so the picker can offer a fast selection:
 
@@ -536,20 +566,28 @@ public enum ScanEvent: Equatable {
     case scanInterrupted
     case arTrackingRestored
     case scanError(ScanError)
-    /// Emitted by the per-category detector flow for each saved image.
+    /// A configured detector produced detections for a saved image.
     case productsDetected(image: ScanDetectionImage, detections: [ScanDetection])
 }
 ```
 
-The detection payloads mirror what is written to the scan's `ScanInfo.json`. Detection `x`/`y` are the **normalized center** of the bounding box; `width`/`height` are normalized dimensions:
+`productsDetected` is emitted once per saved image for any aisle that has configured detectors, and the payload mirrors exactly what is written to the scan's `ScanInfo.json` (`frameResults.specificModelResults`). Detection `x`/`y` are the **normalized center** of the bounding box; `width`/`height` are normalized dimensions:
 
 ```swift
 public struct ScanDetection: Equatable {
+    /// Tracked-product id. Stable across saved images for the same physical
+    /// product, and unique within the session — use it to group a product's
+    /// appearances without re-matching boxes yourself.
     public let id: Int
+
+    /// The product SKU tag (see "Product identity" below).
     public let name: String
+
+    /// The detector class label that produced this detection.
     public let categoryName: String
+
     public let modelName: String
-    public let confidence: Double
+    public let confidence: Double // detector confidence, [0, 1]
     public let x: Double          // normalized bounding-box center X
     public let y: Double          // normalized bounding-box center Y
     public let width: Double
@@ -567,6 +605,16 @@ public struct ScanDetectionImage: Equatable {
 ```
 
 > `scanEvents` / `scanEventsPublisher` emit on the scanner's internal queue. Use `receive(on:)` (Combine) or hop to the main actor before touching UIKit.
+
+#### Product identity: `name` vs `categoryName`
+
+`categoryName` is always the **detector's** class label. `name` is the **product SKU tag**, resolved per detection in three tiers:
+
+1. The frame's classifier top-1, when its confidence clears the project's classifier threshold.
+2. Otherwise, the tracked box's accumulated **voted SKU** — a confidence-weighted vote over that box's classifications so far — when one SKU dominates the tally.
+3. Otherwise, the fixed default tag `"101000000000000000"`.
+
+A project that configures no classifiers gets the default tag on every detection, and `name` carries no product information. Because tier 2 depends on the box's accumulated history, the same `id` can report a more specific `name` in later images of the same scan.
 
 ### ScanResult
 
@@ -774,7 +822,41 @@ public struct ActiveSession {
 | `Arpalus.isSDKReady()` | `Bool` | Returns `true` after successful authentication and initialization. |
 | `Arpalus.getSDKVersion()` | `String` | Returns the SDK version string (e.g., `"1.2(3)"`). |
 | `Arpalus.getSessionsFolderSize()` | `Double` | Returns total local session storage in megabytes. |
-| `Arpalus.clearSessionFolder()` | `Void` | Deletes all local session data. Pending uploads will be lost. |
+| `Arpalus.clearSessionFolder()` | `Void` | Deletes the local scan data of every session waiting to upload and drops their records — those uploads are lost. A session whose archive is actually being streamed right now is left alone and cleaned up when its upload finishes; already-uploaded sessions have no files left, so their records stay for your session list. |
+| `Arpalus.log(_:_:)` | `Void` | Routes a host log line into the SDK's per-scan debug log, so host and SDK events interleave in the `DebugLog.txt` shipped with the scan. |
+
+### Telemetry (Optional)
+
+The SDK can forward its own errors and breadcrumbs to your app, report them to Arpalus, or both. **Reporting to Arpalus is opt-in and off by default.**
+
+```swift
+public static func setTelemetryHandler(
+    _ observer: ArpalusTelemetryObserver?,
+    sdkSelfReports: Bool = false
+)
+
+public static var sdkSelfReportsTelemetry: Bool { get set }
+
+public protocol ArpalusTelemetryObserver: AnyObject {
+    /// Delivered on the main thread.
+    func arpalus(didEmit event: ArpalusTelemetryEvent)
+}
+
+public struct ArpalusTelemetryEvent: Equatable {
+    public enum Kind: String, Equatable { case error, breadcrumb }
+    public enum Level: String, Equatable { case info, warning, error, fatal }
+
+    public let kind: Kind
+    public let name: String              // e.g. "session.uploadFailed"
+    public let level: Level
+    public let message: String?
+    public let attributes: [String: String]
+    /// Grouping hint: signals sharing a fingerprint collapse into one issue.
+    public let fingerprint: [String]?
+}
+```
+
+The observer is held **weakly** — retain it yourself. Registering one does not change `sdkSelfReportsTelemetry`, so you can forward telemetry into your own backend without opting into Arpalus reporting. This controls telemetry only; crash reporting is a separate channel.
 
 ### Finishing Background Uploads
 
@@ -1049,10 +1131,15 @@ public enum ScanModal: Identifiable, Equatable {
     case scanCancellationRequested(scanCount: Int, scanInProgress: Bool)
     case imageLimitReached
     case warningLimitReached
+    /// Device ran out of storage mid-scan; scanning stopped because no more
+    /// images can be saved.
+    case insufficientStorage
 }
 ```
 
 When displaying these modals, use the `ScanControlsInput` methods to handle user choices (e.g., `forceSaveScan()` to save anyway, `resetScan()` to discard, `cancelScan(force: true)` to confirm cancellation).
+
+> **`insufficientData` only applies to scans that run a detector.** It is the stop-time scan-validity gate (minimum images captured, minimum scan duration, minimum detections — all backend-configured). A capture-only scan, on an aisle with no configured detector, has no meaningful detection count and saves directly with no checks at all.
 
 ## 16. Data Models Reference
 
@@ -1082,8 +1169,10 @@ When displaying these modals, use the `ScanControlsInput` methods to handle user
 | `ModelDownloadViewController` | class | Built-in model-download progress UI. |
 | `ScanEvent` | enum | User-visible events emitted during a scan via `ScanViewController.scanEvents`. |
 | `ScanError` | enum | Error payload of `ScanEvent.scanError`. |
-| `ScanDetection` | struct | A single product detection (normalized center + dimensions). |
+| `ScanDetection` | struct | A single product detection (stable track id, SKU tag, normalized center + dimensions). |
 | `ScanDetectionImage` | struct | Image a set of `ScanDetection`s belongs to. |
+| `ArpalusTelemetryEvent` | struct | A telemetry signal (error or breadcrumb) emitted by the SDK. |
+| `ArpalusTelemetryObserver` | protocol | Receives SDK telemetry; register via `setTelemetryHandler`. |
 | `ScanState` | enum | Current scan state: `idle`, `calibrating`, `scanning`, `saving`. |
 | `CalibrationProgress` | struct | Calibration point progress during `calibrating` state. |
 | `WarningType` | enum | Types of guidance warnings during scanning. |
@@ -1207,6 +1296,8 @@ public indirect enum ArpalusError: Error, LocalizedError {
 6. **Check `isSDKReady()` before starting sessions.** This confirms that authentication and initialization completed successfully.
 7. **Use `getSessionsFolderSize()` to monitor storage.** Scan data can accumulate. Consider prompting the user when storage grows large.
 8. **Physical device only.** AR features require a physical device. Include appropriate checks for Simulator builds.
+9. **Respect `allowsUserSegments`.** Don't offer a "scan another section" affordance when the project restricts a session to a single scan.
+10. **Don't treat "no models" as a failure.** An empty `availableDetectors(...)` result, an empty `requiredModels()` manifest, or a `nil` download view controller all mean the project is capture-only — proceed straight to scanning.
 
 ## 20. Complete Integration Example
 
@@ -1229,7 +1320,7 @@ class ScanFlowController {
             switch result {
             case .success(let auth):
                 let clientId = auth.clientId!
-                let projectId = auth.clients[clientId]!
+                let projectId = auth.clients![clientId]!
                     .projects.first!.id
                 self?.initialize(
                     clientId: clientId,
@@ -1334,6 +1425,8 @@ class ScanFlowController {
                     print("Uploading: \(progress)%")
                 case .paused(let progress):
                     print("Upload paused at \(progress)%")
+                case .failed(let failure):
+                    print("Upload failed: \(failure.message) [\(failure.causeCode)]")
                 }
             }
             .store(in: &cancellables)

@@ -42,7 +42,7 @@ git@github.com:Arpalus-dev/spm-distribution.git
 Or add it directly to your `Package.swift`:
 
 ```swift
-.package(url: "git@github.com:Arpalus-dev/spm-distribution.git", from: "2.1.8")
+.package(url: "git@github.com:Arpalus-dev/spm-distribution.git", from: "3.0.1")
 ```
 
 ### 3. Declare camera usage
@@ -67,10 +67,10 @@ import ArpalusSDK
 Arpalus.authenticate(token: "your-access-key") { result in
     guard case .success(let auth) = result,
           let clientId = auth.clientId,
-          let projectId = auth.clients[clientId]?.projects.first?.id
+          let projectId = auth.clients?[clientId]?.projects.first?.id
     else { return }
 
-    // 2. Initialize (downloads ML models on first run)
+    // 2. Initialize (downloads ML models on first run, if the project ships any)
     Arpalus.initialize(clientId: clientId, projectId: projectId) { result in
         guard case .success(let hierarchy) = result,
               let store = hierarchy.stores.first,
