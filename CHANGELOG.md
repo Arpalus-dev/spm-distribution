@@ -8,6 +8,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 _Changes that have not yet been released will be listed here._
 
+## [3.0.2] — 2026-09-23
+
+A stability release. One behavior change matters for host apps: uploads that fail because the user is signed out now **wait for the next sign-in** instead of failing terminally.
+
+### Added
+
+- **`ScanDetection.classifier`** (`notConfigured` / `ready` / `failedToLoad`) says whether a classifier was available for the detection's label, so a default SKU tag caused by a missing or unloaded classifier can be told apart from a low-confidence one.
+- **`ScanDetection.confidenceProduct`** carries the confidence behind the resolved SKU in `name`: the classifier's confidence, the vote share, or the detector confidence when the default tag is used.
+
+### Changed
+
+- **Signed-out uploads wait for sign-in instead of failing.** An upload rejected because the user is signed out now stays `.pending`, doesn't count as a retry attempt, and resumes after the next successful `authenticate` / `login` / `restoreSession`. Only the signed-in user's sessions upload; another user's queued scans wait for that user to sign in again. A `401`/`403` on the upload `PUT` itself is unchanged and still fails as `upload.urlExpired`.
+- **`onSessionExpired` fires once per sign-in** rather than once for every caller of a rejected token refresh.
+- **Upload retries back off** (10s → 20s → 40s → 60s) instead of retrying every 10s, so a short outage no longer fails a session terminally within about 5 minutes. The same 20 attempts now span about 18 minutes.
+- **Only one scan view controller per session.** `getScanViewController` fails with `scan.viewCreationFailed` while a scan view controller for that session already exists.
+- **`ScanDetection.id` stays unique across scan-screen reopens**, including after an app relaunch, so a resumed session never reuses an id.
+- **The pre-scan memory check now uses the app's real remaining memory.** It previously almost never tripped, so a scan may now be refused on a device that is genuinely low on memory.
+- **A partial `models_v2` configuration no longer fails `initialize`.** Missing fields default to empty.
+
+### Fixed
+
+- **A scan could be discarded on save** when some of its log metadata was missing. It is now saved.
+- **Crashes:**
+  - While scanning on low-memory devices (for example, iPhone SE 2nd generation), when a captured image was being saved.
+  - On devices that had taken many scans over time, when the SDK saved session state (for example, at the start or end of a session, or when an upload finished).
+  - When `initialize` was called again before a previous call had finished.
+  - When `initialize` was called while the scan screen was open, on the next scan started from that screen.
+- **Concurrent `initialize(autoDownloadModels:)`, `downloadRequiredModels` and `prepareDetectors` calls failed** with `storage.writeFailed`. They now share one download per model, and progress reaches every caller in order.
+- **App hang at startup** when the SDK was first used from a background thread and the main thread at the same time.
+- **Overlapping sign-ins, sign-outs and token refreshes** could leave another account's tokens in place or bring back state after logout. They now resolve in order.
+
 ## [3.0.1] — 2026-08-16
 
 The headline change is that **scanning is now uniform and models are optional**. There is one scanning flow for every aisle, the generic "General Product" detector is an ordinary configured detector rather than a privileged fallback, and a project may ship no models at all. Most of this surfaces as behavior rather than API, but two host-visible contracts changed — see **Changed** below.
@@ -134,7 +165,8 @@ Initial 2.x release. Major rewrite covering:
 - New session management API: `startSession` / `getScanViewController(sessionId:)` / `endAndUploadSession` / `cancelSession` / `listActiveSessions`.
 - Resumable background uploads with `getUploadInfo()` Combine publisher.
 
-[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v3.0.2...HEAD
+[3.0.2]: https://github.com/Arpalus-dev/spm-distribution/compare/v3.0.1...v3.0.2
 [3.0.1]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.8...v3.0.1
 [2.1.8]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.7...v2.1.8
 [2.1.7]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.6...v2.1.7

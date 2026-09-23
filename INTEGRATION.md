@@ -145,7 +145,7 @@ public static func logout(completion: (() -> Void)? = nil)
 
 ### Detecting Session Expiry
 
-If the SDK's silent token refresh fails because the refresh token is no longer valid, the user's session has truly expired. Observe the `onSessionExpired` publisher and route the user back to sign-in. The SDK is **not** logged out automatically, so any unfinished sessions survive for later upload:
+If the SDK's silent token refresh fails because the refresh token is no longer valid, the user's session has truly expired. Observe the `onSessionExpired` publisher and route the user back to sign-in. The SDK is **not** logged out automatically, so any unfinished sessions survive for later upload. It fires once per sign-in, however many SDK calls were waiting on the failed refresh:
 
 ```swift
 import Combine
@@ -466,6 +466,8 @@ public static func getScanViewController(
 
 > **Failure codes:** `session.notFound`, `session.notActive`, `scan.viewCreationFailed`, plus the pre-scan `permissions.denied` / `resources.*` checks.
 
+> **One scan view controller per session.** While a `ScanViewController` for a session is still alive, requesting another one for the same session fails with `scan.viewCreationFailed`. Release the previous controller before requesting a new one.
+
 ### ScanViewController
 
 ```swift
@@ -575,6 +577,12 @@ public enum ScanEvent: Equatable {
 
 ```swift
 public struct ScanDetection: Equatable {
+    public enum ClassifierAvailability: String, Equatable {
+        case notConfigured // the project configures no classifier for this label
+        case ready         // a classifier for this label is loaded
+        case failedToLoad  // a classifier is configured but could not be loaded
+    }
+
     /// Tracked-product id. Stable across saved images for the same physical
     /// product, and unique within the session — use it to group a product's
     /// appearances without re-matching boxes yourself.
@@ -586,8 +594,12 @@ public struct ScanDetection: Equatable {
     /// The detector class label that produced this detection.
     public let categoryName: String
 
+    /// Whether a classifier was available for this detection's label.
+    public let classifier: ClassifierAvailability
+
     public let modelName: String
-    public let confidence: Double // detector confidence, [0, 1]
+    public let confidence: Double        // detector confidence, [0, 1]
+    public let confidenceProduct: Double // confidence behind `name`, [0, 1]
     public let x: Double          // normalized bounding-box center X
     public let y: Double          // normalized bounding-box center Y
     public let width: Double
@@ -610,11 +622,11 @@ public struct ScanDetectionImage: Equatable {
 
 `categoryName` is always the **detector's** class label. `name` is the **product SKU tag**, resolved per detection in three tiers:
 
-1. The frame's classifier top-1, when its confidence clears the project's classifier threshold.
-2. Otherwise, the tracked box's accumulated **voted SKU** — a confidence-weighted vote over that box's classifications so far — when one SKU dominates the tally.
-3. Otherwise, the fixed default tag `"101000000000000000"`.
+1. The frame's classifier top-1, when its confidence clears the project's classifier threshold. `confidenceProduct` is that classifier confidence.
+2. Otherwise, the tracked box's accumulated **voted SKU** — a confidence-weighted vote over that box's classifications so far — when one SKU dominates the tally. `confidenceProduct` is the winning SKU's vote share.
+3. Otherwise, the fixed default tag `"101000000000000000"`. `confidenceProduct` is the detector confidence.
 
-A project that configures no classifiers gets the default tag on every detection, and `name` carries no product information. Because tier 2 depends on the box's accumulated history, the same `id` can report a more specific `name` in later images of the same scan.
+A project that configures no classifiers gets the default tag on every detection, and `name` carries no product information. Use `classifier` to tell why a detection carries the default tag: with `.ready` the classifier ran but wasn't confident enough; with `.notConfigured` or `.failedToLoad` there was no classifier to run for that label. Because tier 2 depends on the box's accumulated history, the same `id` can report a more specific `name` in later images of the same scan.
 
 ### ScanResult
 
@@ -749,6 +761,8 @@ public struct UploadFailureInfo: Codable, Equatable {
 > Render both as a distinct **"Expired"** status rather than a generic failure, and suggest re-scanning if the data is still needed. Branch on `causeCode` if you want different copy for the two. `listActiveSessions()` sweeps expired sessions before returning, so a list built from it never shows a live-looking `"pending"` for a scan that can no longer upload.
 
 > **Only *terminal* failures pin the `.failed` state.** A session marked `.failed` (a non-retryable error, or one that exhausted the retry cap) won't upload again without user action — call [`retryUpload(sessionId:)`](#11-session-management). Transient failures that the SDK is still auto-retrying don't change `state`; their details still appear in `info.failures`.
+
+> **Signed-out uploads wait for sign-in.** An upload that can't authenticate because the user is signed out is not a failure: the session stays `pending`, no retry attempt is spent, and the upload resumes after the next successful `authenticate`, `login` or `restoreSession`. Only the signed-in user's sessions upload; another user's queued sessions wait until that user signs in again.
 
 ## 11. Session Management
 
