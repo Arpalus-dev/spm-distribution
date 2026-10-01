@@ -560,6 +560,12 @@ public enum ScanEvent: Equatable {
     case warningShown(WarningType)
     case warningsCleared(scope: WarningClearScope)
     case modalShown(ScanModal)
+    /// Done was tapped on a short batch of scans; emitted right before
+    /// `.modalShown(.shortScanConfirmation)`.
+    case shortScanConfirmationRequested(ShortScanCheck)
+    /// `true` (Yes) ends the session; `false` (No) stays in the scanner and is
+    /// followed by `.modalShown(.startAnotherScan)`.
+    case shortScanConfirmationAnswered(scannedWholeAisle: Bool)
     case imageCountChanged(Int)
     case scanStarted(scanId: String)
     case scanSaved(scanId: String, scanNumber: Int)
@@ -972,6 +978,7 @@ public protocol ScanControlsInput: AnyObject {
     func forceSaveScan()           // Force-save even if minimum thresholds not met
     func cancelScan(force: Bool)   // Cancel entire session
     func endScan()                 // End the session normally
+    func confirmScanComplete(_ scannedWholeAisle: Bool) // Answer shortScanConfirmation: true ends the session, false stays in it
 }
 ```
 
@@ -1148,10 +1155,28 @@ public enum ScanModal: Identifiable, Equatable {
     /// Device ran out of storage mid-scan; scanning stopped because no more
     /// images can be saved.
     case insufficientStorage
+    /// Done was tapped on a short batch of scans; asks whether the whole side
+    /// of the aisle was scanned.
+    case shortScanConfirmation
+    /// The user answered No to `shortScanConfirmation`; asks them to start
+    /// another scan.
+    case startAnotherScan
 }
 ```
 
-When displaying these modals, use the `ScanControlsInput` methods to handle user choices (e.g., `forceSaveScan()` to save anyway, `resetScan()` to discard, `cancelScan(force: true)` to confirm cancellation).
+When displaying these modals, use the `ScanControlsInput` methods to handle user choices (e.g., `forceSaveScan()` to save anyway, `resetScan()` to discard, `cancelScan(force: true)` to confirm cancellation, `confirmScanComplete(true/false)` to answer `shortScanConfirmation`). `startAnotherScan` is informational: just dismiss it.
+
+> **Short-scan confirmation (since 3.0.3) is off unless the project enables it.** When the user taps **Done**, the session's saved scans are summed: images, scan duration (start to Stop) and planogram width. If any total is below its backend-configured minimum, the SDK shows `shortScanConfirmation` and emits `.shortScanConfirmationRequested(ShortScanCheck)` with the totals and the `shortMeasures` that triggered it. A custom overlay must answer with `confirmScanComplete(_:)`, or the session stays open. Tapping Stop never asks, and single-scan projects (`allowsUserSegments == false`) have no Done button, so they never ask. It works with or without a detector.
+>
+> ```swift
+> public struct ShortScanCheck: Equatable {
+>     public enum Measure: String, Equatable { case imageCount, duration, planogramWidth }
+>     public let imageCount: Int
+>     public let durationSeconds: TimeInterval
+>     public let planogramWidthMeters: Double
+>     public let shortMeasures: [Measure]
+> }
+> ```
 
 > **`insufficientData` only applies to scans that run a detector.** It is the stop-time scan-validity gate (minimum images captured, minimum scan duration, minimum detections — all backend-configured). A capture-only scan, on an aisle with no configured detector, has no meaningful detection count and saves directly with no checks at all.
 
@@ -1185,6 +1210,7 @@ When displaying these modals, use the `ScanControlsInput` methods to handle user
 | `ScanError` | enum | Error payload of `ScanEvent.scanError`. |
 | `ScanDetection` | struct | A single product detection (stable track id, SKU tag, normalized center + dimensions). |
 | `ScanDetectionImage` | struct | Image a set of `ScanDetection`s belongs to. |
+| `ShortScanCheck` | struct | Summed batch totals and short measures behind `ScanModal.shortScanConfirmation`. |
 | `ArpalusTelemetryEvent` | struct | A telemetry signal (error or breadcrumb) emitted by the SDK. |
 | `ArpalusTelemetryObserver` | protocol | Receives SDK telemetry; register via `setTelemetryHandler`. |
 | `ScanState` | enum | Current scan state: `idle`, `calibrating`, `scanning`, `saving`. |

@@ -8,6 +8,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 _Changes that have not yet been released will be listed here._
 
+## [3.0.3] — 2026-10-01
+
+Adds an optional, per-project **short-scan confirmation**: when the user taps **Done** on a short batch of scans, the scanner asks whether the whole side of the aisle was scanned. It is off unless the project turns it on.
+
+### Added
+
+- **Short-scan confirmation on Done.** When enabled for the project, tapping **Done** sums the session's saved scans (images, scan duration, planogram width). If any total is below its configured minimum, the scanner shows `ScanModal.shortScanConfirmation`. **Yes** ends the session. **No** keeps the user in the scanner to add scans and shows `ScanModal.startAnotherScan`. Tapping Stop never asks, and single-scan projects (`allowsUserSegments == false`) have no Done button, so they never ask.
+- **`ScanEvent.shortScanConfirmationRequested(ShortScanCheck)`** is emitted right before `.modalShown(.shortScanConfirmation)`. **`ShortScanCheck`** carries the summed `imageCount`, `durationSeconds` and `planogramWidthMeters`, plus the `shortMeasures` that triggered the question.
+- **`ScanEvent.shortScanConfirmationAnswered(scannedWholeAisle:)`** reports the user's answer.
+- **`ScanControlsInput.confirmScanComplete(_:)`** answers `shortScanConfirmation` from a custom overlay: `true` ends the session, `false` stays in it.
+
+### Changed
+
+- **New `ScanModal` and `ScanEvent` cases.** An exhaustive `switch` over either enum needs a `default` or the new cases: `.shortScanConfirmation`, `.startAnotherScan`, `.shortScanConfirmationRequested`, `.shortScanConfirmationAnswered`.
+- **Confirmation sheets size to their text**, so long backend-configured titles and messages are no longer clipped. A literal `\n` in a configured text is shown as a line break.
+- **On/off project settings accept `1`/`0`** as well as `true`/`false`.
+
+### Fixed
+
+- **The planogram width covered only part of the scan**, and was `0` on aisles with no detector configured. It is now measured from the shelf area the saved images covered, for every scan that saved an image.
+
 ## [3.0.2] — 2026-09-23
 
 A stability release. One behavior change matters for host apps: uploads that fail because the user is signed out now **wait for the next sign-in** instead of failing terminally.
@@ -165,7 +186,8 @@ Initial 2.x release. Major rewrite covering:
 - New session management API: `startSession` / `getScanViewController(sessionId:)` / `endAndUploadSession` / `cancelSession` / `listActiveSessions`.
 - Resumable background uploads with `getUploadInfo()` Combine publisher.
 
-[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v3.0.2...HEAD
+[Unreleased]: https://github.com/Arpalus-dev/spm-distribution/compare/v3.0.3...HEAD
+[3.0.3]: https://github.com/Arpalus-dev/spm-distribution/compare/v3.0.2...v3.0.3
 [3.0.2]: https://github.com/Arpalus-dev/spm-distribution/compare/v3.0.1...v3.0.2
 [3.0.1]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.8...v3.0.1
 [2.1.8]: https://github.com/Arpalus-dev/spm-distribution/compare/v2.1.7...v2.1.8
